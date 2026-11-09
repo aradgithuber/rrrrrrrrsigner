@@ -1,0 +1,79 @@
+name: Sign APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        required: true
+        type: string
+      file_id:
+        required: true
+        type: string
+      chat_id:
+        required: true
+        type: string
+      user_id:
+        required: true
+        type: string
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+
+    steps:
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install build-tools
+        run: |
+          sdkmanager "build-tools;34.0.0"
+          echo "$ANDROID_HOME/build-tools/34.0.0" >> $GITHUB_PATH
+
+      - name: Download APK
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          RESP=$(curl -s "https://api.telegram.org/bot${TOKEN}/getFile?file_id=${{ inputs.file_id }}")
+          PATH=$(echo $RESP | jq -r .result.file_path)
+          curl -L -o input.apk "https://api.telegram.org/file/bot${TOKEN}/${PATH}"
+          ls -lh input.apk
+
+      - name: Decode Keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > keystore.jks
+
+      - name: Sign APK
+        env:
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASS: ${{ secrets.KEY_PASSWORD }}
+          ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          zipalign -p 4 input.apk aligned.apk
+          apksigner sign \
+            --ks keystore.jks \
+            --ks-key-alias "$ALIAS" \
+            --ks-pass pass:"$KS_PASS" \
+            --key-pass pass:"$KEY_PASS" \
+            --out signed.apk aligned.apk
+          apksigner verify signed.apk
+
+      - name: Send back to Worker
+        env:
+          SECRET: ${{ secrets.CALLBACK_SECRET }}
+          URL: ${{ secrets.WORKER_URL }}
+        run: |
+          curl -X POST \
+            -H "Authorization: Bearer ${SECRET}" \
+            -F "job_id=${{ inputs.job_id }}" \
+            -F "file=@signed.apk;filename=signed.apk" \
+            "${URL}/callback" --fail --max-time 90
+
+      - name: Cleanup
+        if: always()
+        run: rm -f *.apk keystore.jks || true
